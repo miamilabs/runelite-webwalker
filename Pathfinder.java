@@ -12,9 +12,12 @@ import java.time.Instant;
 import java.util.*;
 
 /**
- * A* pathfinding implementation with support for shortcuts/transportations.
- * This refactored version improves readability, uses a closed set,
- * and simplifies time checks and heuristic calculations.
+ * An A* pathfinding implementation with support for shortcuts (transportations).
+ * 
+ * Key improvements:
+ * - More modular: separated logic into smaller, focused methods.
+ * - Enhanced readability and commented steps.
+ * - Reduced code duplication in neighbor and cost calculations.
  */
 public class Pathfinder {
     private final CollisionMap collisionMap;
@@ -28,6 +31,11 @@ public class Pathfinder {
         this.shortcutMap = shortcutMap;
     }
 
+    /**
+     * Finds a path from start to end using A*, returning a list of PathSteps.
+     * Includes support for "shortcuts" (transportations) which can bypass normal tile restrictions.
+     * Times out after 2 seconds if no path is found.
+     */
     public List<PathStep> findPath(WorldPoint start, WorldPoint end) {
         Instant startTime = Instant.now();
         Instant deadline = startTime.plusMillis(2000); // 2-second timeout
@@ -38,6 +46,7 @@ public class Pathfinder {
 
         int startPacked = PointUtils.packWorldPoint(start.getX(), start.getY(), start.getPlane());
         int endPacked = PointUtils.packWorldPoint(end.getX(), end.getY(), end.getPlane());
+
         this.startPackedPoint = startPacked;
 
         Node startNode = new Node(startPacked, null, 0, heuristic(startPacked, endPacked), false, null);
@@ -50,12 +59,10 @@ public class Pathfinder {
             }
 
             Node current = openSet.poll();
-            if (current == null) {
-                break; 
-            }
+            if (current == null) break; // No more nodes
 
             if (closedSet.contains(current.packedPoint)) {
-                // We've already processed a better route to this tile
+                // Already processed a better route
                 continue;
             }
 
@@ -79,11 +86,13 @@ public class Pathfinder {
             }
         }
 
+        // No path found
         return Collections.emptyList();
     }
 
     /**
-     * Process a neighbor node: Update costs and paths if a better route is found.
+     * Processes a neighbor node to see if a better route exists through the current node.
+     * Updates openSet and allNodes accordingly.
      */
     private void processNeighbor(PriorityQueue<Node> openSet, Node current, int neighborPacked, int endPacked) {
         if (neighborPacked == current.packedPoint) return;
@@ -113,7 +122,7 @@ public class Pathfinder {
     }
 
     /**
-     * Reconstruct the path from the end node by tracing back `cameFrom` links.
+     * Constructs the path by tracing from the end node back to the start node.
      */
     private List<PathStep> constructPath(Node current) {
         List<PathStep> path = new ArrayList<>();
@@ -139,100 +148,102 @@ public class Pathfinder {
     }
 
     /**
-     * Returns the cost of moving from currentPacked to neighborPacked.
-     * If the tile is not reachable (blocked) and not a shortcut, returns -1.
+     * Calculates the movement cost from one tile to another. 
+     * Returns -1 if unreachable (except if a shortcut).
      */
     private double getMovementCost(int currentPacked, int neighborPacked) {
         boolean isShortcut = isShortcutMovement(currentPacked, neighborPacked);
-        double cost = getShortcutCost(currentPacked, neighborPacked);
-        boolean canMoveTile = canMove(currentPacked, neighborPacked);
-        boolean blocked = isBlocked(neighborPacked);
 
-        // If we reached this tile via transportation, we might ignore blockages
-        Node currentNode = allNodes.get(currentPacked);
-        if (currentNode != null && currentNode.viaTransportation) {
-            blocked = false;
+        // Shortcut cost can override normal blocked checks.
+        double cost = isShortcut ? getShortcutCost(currentPacked, neighborPacked) : -1;
+        if (isShortcut && cost >= 0) {
+            return cost;
         }
 
-        double distance = distance(currentPacked, neighborPacked);
-        if (isShortcut) {
-            blocked = false; // Shortcut overrides block checks
+        // If not a shortcut, check normal movement conditions
+        if (!canMove(currentPacked, neighborPacked)) {
+            return -1;
         }
 
-        // If the tile has a shortcut, consider it accessible
-        if (isShortcutAvailableAt(neighborPacked)) {
-            blocked = false;
-            canMoveTile = true;
-        }
-
-        double moveCost = (canMoveTile && !blocked) ? distance : -1;
-        return isShortcut ? cost : moveCost;
+        // If reachable by normal movement, use distance cost
+        return distance(currentPacked, neighborPacked);
     }
 
+    /**
+     * Retrieve a transportation object if a shortcut is used.
+     */
     private Transportation getTransportation(int currentPacked, int neighborPacked) {
-        // Check specific shortcuts
-        List<Transportation> transports = shortcutMap.getOrDefault(currentPacked, Collections.emptyList());
-        for (Transportation t : transports) {
-            if (t.isAvailable() && isMatchingDestination(t, neighborPacked)) {
-                return t;
-            }
+        // Check specific shortcuts from currentPacked
+        Transportation t = findTransportationInList(shortcutMap.getOrDefault(currentPacked, Collections.emptyList()), neighborPacked);
+        if (t != null) return t;
+
+        // Check global shortcuts if at the start tile
+        if (currentPacked == startPackedPoint) {
+            t = findTransportationInList(shortcutMap.getOrDefault(PiggyWalkerPlugin.GLOBAL_KEY, Collections.emptyList()), neighborPacked);
         }
 
-        // Check global shortcuts if at start
-        if (currentPacked == startPackedPoint) {
-            List<Transportation> globalTransports = shortcutMap.getOrDefault(PiggyWalkerPlugin.GLOBAL_KEY, Collections.emptyList());
-            for (Transportation t : globalTransports) {
-                if (t.isAvailable() && isMatchingDestination(t, neighborPacked)) {
-                    return t;
-                }
+        return t;
+    }
+
+    private Transportation findTransportationInList(List<Transportation> transports, int neighborPacked) {
+        for (Transportation trans : transports) {
+            if (trans.isAvailable() && isMatchingDestination(trans, neighborPacked)) {
+                return trans;
             }
         }
         return null;
     }
 
+    /**
+     * Checks if movement between two tiles involves a shortcut.
+     */
     private boolean isShortcutMovement(int currentPacked, int neighborPacked) {
         return hasSpecificShortcut(currentPacked, neighborPacked) ||
                (currentPacked == startPackedPoint && hasGlobalShortcut(neighborPacked));
     }
 
     private boolean hasSpecificShortcut(int currentPacked, int neighborPacked) {
-        List<Transportation> shortcuts = shortcutMap.getOrDefault(currentPacked, Collections.emptyList());
-        return shortcuts.stream().anyMatch(s -> s.isAvailable() && isMatchingDestination(s, neighborPacked));
+        return shortcutMap.getOrDefault(currentPacked, Collections.emptyList()).stream()
+                .anyMatch(s -> s.isAvailable() && isMatchingDestination(s, neighborPacked));
     }
 
     private boolean hasGlobalShortcut(int neighborPacked) {
-        List<Transportation> globalShortcuts = shortcutMap.getOrDefault(PiggyWalkerPlugin.GLOBAL_KEY, Collections.emptyList());
-        return globalShortcuts.stream().anyMatch(s -> s.isAvailable() && isMatchingDestination(s, neighborPacked));
+        return shortcutMap.getOrDefault(PiggyWalkerPlugin.GLOBAL_KEY, Collections.emptyList()).stream()
+                .anyMatch(s -> s.isAvailable() && isMatchingDestination(s, neighborPacked));
     }
 
     private boolean isMatchingDestination(Transportation shortcut, int packedPoint) {
         return PointUtils.packWorldPoint(shortcut.getDestinationX(), shortcut.getDestinationY(), shortcut.getDestinationZ()) == packedPoint;
     }
 
+    /**
+     * Get the cost of a shortcut if available, else -1.
+     */
     private double getShortcutCost(int currentPacked, int neighborPacked) {
-        double specificCost = getCostFromShortcuts(shortcutMap.get(currentPacked), neighborPacked);
-        double globalCost = (currentPacked == startPackedPoint) ? getCostFromShortcuts(shortcutMap.get(PiggyWalkerPlugin.GLOBAL_KEY), neighborPacked) : Double.MAX_VALUE;
-        double minCost = Math.min(specificCost, globalCost);
-        return minCost < Double.MAX_VALUE ? minCost : -1;
+        double cost = findMinShortcutCost(shortcutMap.get(currentPacked), neighborPacked);
+        if (currentPacked == startPackedPoint) {
+            double globalCost = findMinShortcutCost(shortcutMap.get(PiggyWalkerPlugin.GLOBAL_KEY), neighborPacked);
+            cost = Math.min(cost < 0 ? Double.MAX_VALUE : cost, globalCost < 0 ? Double.MAX_VALUE : globalCost);
+        }
+        return (cost == Double.MAX_VALUE) ? -1 : cost;
     }
 
-    private double getCostFromShortcuts(List<Transportation> shortcuts, int neighborPacked) {
-        if (shortcuts == null) return Double.MAX_VALUE;
+    private double findMinShortcutCost(List<Transportation> shortcuts, int neighborPacked) {
+        if (shortcuts == null || shortcuts.isEmpty()) return -1;
         return shortcuts.stream()
                 .filter(s -> isMatchingDestination(s, neighborPacked))
                 .mapToDouble(Transportation::getDuration)
                 .min()
-                .orElse(Double.MAX_VALUE);
+                .orElse(-1);
     }
 
+    /**
+     * Checks if a tile is blocked. If it has a shortcut, it's not considered blocked.
+     */
     private boolean isBlocked(int packedPoint) {
-        // Start point or a tile with shortcuts isn't considered blocked.
-        if (packedPoint == startPackedPoint) {
-            return false;
-        }
-        if (isShortcutAvailableAt(packedPoint)) {
-            return false;
-        }
+        if (packedPoint == startPackedPoint) return false;
+        if (isShortcutAvailableAt(packedPoint)) return false;
+
         return collisionMap.all(
                 (short) PointUtils.unpackWorldX(packedPoint),
                 (short) PointUtils.unpackWorldY(packedPoint),
@@ -241,30 +252,33 @@ public class Pathfinder {
     }
 
     private boolean isShortcutAvailableAt(int packedPoint) {
-        return shortcutMap.containsKey(packedPoint) && !shortcutMap.get(packedPoint).isEmpty();
+        List<Transportation> list = shortcutMap.get(packedPoint);
+        return list != null && !list.isEmpty();
     }
 
+    /**
+     * Determines if movement from currentPacked to neighborPacked is possible under normal conditions.
+     */
     private boolean canMove(int currentPacked, int neighborPacked) {
-        if (currentPacked == startPackedPoint) {
-            return true;
-        }
-
+        // If at start or came from a transportation, ignore normal block checks.
         Node currentNode = allNodes.get(currentPacked);
-        if (currentNode != null && currentNode.viaTransportation) {
+        if (currentPacked == startPackedPoint || (currentNode != null && currentNode.viaTransportation)) {
             return true;
         }
 
-        if (isShortcutMovement(currentPacked, neighborPacked)) return true;
-        if (isShortcutAvailableAt(neighborPacked)) return true;
+        // If a shortcut is used or available at the destination, movement is possible
+        if (isShortcutMovement(currentPacked, neighborPacked) || isShortcutAvailableAt(neighborPacked)) {
+            return true;
+        }
 
-        Optional<Direction> optionalDirection = Direction.getDirection(
+        // Check directional collision flags for normal movement
+        Optional<Direction> optDir = Direction.getDirection(
                 PointUtils.unpackWorldX(neighborPacked) - PointUtils.unpackWorldX(currentPacked),
                 PointUtils.unpackWorldY(neighborPacked) - PointUtils.unpackWorldY(currentPacked)
         );
-        if (optionalDirection.isEmpty()) return false;
+        if (optDir.isEmpty()) return false;
 
-        Direction direction = optionalDirection.get();
-        return isDirectionUnblocked(currentPacked, neighborPacked, direction);
+        return isDirectionUnblocked(currentPacked, neighborPacked, optDir.get());
     }
 
     private boolean isDirectionUnblocked(int currentPacked, int neighborPacked, Direction direction) {
@@ -281,15 +295,19 @@ public class Pathfinder {
         return (currentFlag & direction.getCurrentFlag()) != 0 && (neighborFlag & direction.getNeighborFlag()) != 0;
     }
 
+    /**
+     * Euclidean/diagonal distance approximation.
+     * Diagonal step costs ~1.414, straight steps cost 1.0.
+     */
     private double distance(int aPacked, int bPacked) {
         int dx = Math.abs(PointUtils.unpackWorldX(aPacked) - PointUtils.unpackWorldX(bPacked));
         int dy = Math.abs(PointUtils.unpackWorldY(aPacked) - PointUtils.unpackWorldY(bPacked));
-        // Diagonal cost ~1.414 for diagonal moves, else 1.0
         return (dx == 1 && dy == 1) ? Math.sqrt(2) : 1.0;
     }
 
     /**
-     * Heuristic using Chebyshev distance (max(dx, dy)) is often suitable for grids allowing diagonal movement.
+     * Heuristic: Chebyshev distance (max(dx, dy)).
+     * Suited for grids where diagonal movement is allowed.
      */
     private double heuristic(int aPacked, int bPacked) {
         int dx = Math.abs(PointUtils.unpackWorldX(aPacked) - PointUtils.unpackWorldX(bPacked));
@@ -301,6 +319,9 @@ public class Pathfinder {
         return Instant.now().isAfter(deadline);
     }
 
+    /**
+     * Returns all neighbors of a given tile, including shortcut destinations.
+     */
     private List<Integer> getNeighbors(int packedPoint) {
         List<Integer> neighbors = new ArrayList<>();
         Node currentNode = allNodes.get(packedPoint);
@@ -309,13 +330,14 @@ public class Pathfinder {
         int x = PointUtils.unpackWorldX(packedPoint);
         int y = PointUtils.unpackWorldY(packedPoint);
         int z = PointUtils.unpackWorldPlane(packedPoint);
+
         byte flags = collisionMap.all((short) x, (short) y, (byte) z);
 
-        // If via transportation or starting tile, ignore flags and add all directions
+        // If via transportation or at start, ignore collision flags and consider all directions
         if (viaTransportation || packedPoint == startPackedPoint) {
-            addCardinalNeighborsIgnoreFlags(neighbors, x, y, z);
+            addAllDirectionalNeighbors(neighbors, x, y, z);
         } else {
-            addCardinalNeighbors(neighbors, x, y, z, flags);
+            addFlagBasedNeighbors(neighbors, x, y, z, flags);
         }
 
         addTransportationNeighbors(neighbors, packedPoint);
@@ -324,79 +346,84 @@ public class Pathfinder {
         return neighbors;
     }
 
+    /**
+     * Add all eight directions regardless of flags.
+     */
+    private void addAllDirectionalNeighbors(List<Integer> neighbors, int x, int y, int z) {
+        int[][] directions = {
+                {0,1}, {0,-1}, {1,0}, {-1,0},
+                {1,1}, {-1,1}, {1,-1}, {-1,-1}
+        };
+
+        for (int[] dir : directions) {
+            neighbors.add(PointUtils.packWorldPoint(x + dir[0], y + dir[1], z));
+        }
+    }
+
+    /**
+     * Add neighbors based on collision flags.
+     */
+    private void addFlagBasedNeighbors(List<Integer> neighbors, int x, int y, int z, byte flags) {
+        // Straight moves
+        if ((flags & Flags.NORTH) != 0) neighbors.add(PointUtils.packWorldPoint(x, y + 1, z));
+        if ((flags & Flags.SOUTH) != 0) neighbors.add(PointUtils.packWorldPoint(x, y - 1, z));
+        if ((flags & Flags.EAST) != 0)  neighbors.add(PointUtils.packWorldPoint(x + 1, y, z));
+        if ((flags & Flags.WEST) != 0)  neighbors.add(PointUtils.packWorldPoint(x - 1, y, z));
+
+        // Diagonals
+        if ((flags & Flags.NORTHEAST) != 0) neighbors.add(PointUtils.packWorldPoint(x + 1, y + 1, z));
+        if ((flags & Flags.NORTHWEST) != 0) neighbors.add(PointUtils.packWorldPoint(x - 1, y + 1, z));
+        if ((flags & Flags.SOUTHEAST) != 0) neighbors.add(PointUtils.packWorldPoint(x + 1, y - 1, z));
+        if ((flags & Flags.SOUTHWEST) != 0) neighbors.add(PointUtils.packWorldPoint(x - 1, y - 1, z));
+    }
+
+    /**
+     * Add any transportation shortcuts available from this tile.
+     */
+    private void addTransportationNeighbors(List<Integer> neighbors, int packedPoint) {
+        // Specific shortcuts
+        addShortcutDestinations(neighbors, shortcutMap.getOrDefault(packedPoint, Collections.emptyList()), packedPoint);
+
+        // Global shortcuts if at start
+        if (packedPoint == startPackedPoint) {
+            addShortcutDestinations(neighbors, shortcutMap.getOrDefault(PiggyWalkerPlugin.GLOBAL_KEY, Collections.emptyList()), packedPoint);
+        }
+    }
+
+    private void addShortcutDestinations(List<Integer> neighbors, List<Transportation> transports, int currentPacked) {
+        for (Transportation t : transports) {
+            if (t.isAvailable()) {
+                int dest = PointUtils.packWorldPoint(t.getDestinationX(), t.getDestinationY(), t.getDestinationZ());
+                if (dest != currentPacked) {
+                    neighbors.add(dest);
+                }
+            }
+        }
+    }
+
+    /**
+     * Adjacent tiles that contain shortcuts should be considered reachable neighbors,
+     * because we can move onto a tile that hosts a shortcut.
+     */
     private void addAdjacentTransportationTiles(List<Integer> neighbors, int x, int y, int z) {
         int[][] directions = {
-                {0, 1}, {1, 0}, {0, -1}, {-1, 0},
-                {1, 1}, {-1, 1}, {1, -1}, {-1, -1}
+            {0, 1}, {1, 0}, {0, -1}, {-1, 0},
+            {1, 1}, {-1, 1}, {1, -1}, {-1, -1}
         };
 
         for (int[] dir : directions) {
             int nx = x + dir[0];
             int ny = y + dir[1];
             int neighborPacked = PointUtils.packWorldPoint(nx, ny, z);
-
             if (isShortcutAvailableAt(neighborPacked)) {
                 neighbors.add(neighborPacked);
             }
         }
     }
 
-    private void addCardinalNeighborsIgnoreFlags(List<Integer> neighbors, int x, int y, int z) {
-        neighbors.add(PointUtils.packWorldPoint(x, y + 1, z));
-        neighbors.add(PointUtils.packWorldPoint(x, y - 1, z));
-        neighbors.add(PointUtils.packWorldPoint(x + 1, y, z));
-        neighbors.add(PointUtils.packWorldPoint(x - 1, y, z));
-        neighbors.add(PointUtils.packWorldPoint(x + 1, y + 1, z));
-        neighbors.add(PointUtils.packWorldPoint(x - 1, y + 1, z));
-        neighbors.add(PointUtils.packWorldPoint(x + 1, y - 1, z));
-        neighbors.add(PointUtils.packWorldPoint(x - 1, y - 1, z));
-    }
-
-    private void addCardinalNeighbors(List<Integer> neighbors, int x, int y, int z, byte flags) {
-        if ((flags & Flags.NORTH) != 0) {
-            neighbors.add(PointUtils.packWorldPoint(x, y + 1, z));
-        }
-        if ((flags & Flags.SOUTH) != 0) {
-            neighbors.add(PointUtils.packWorldPoint(x, y - 1, z));
-        }
-        if ((flags & Flags.EAST) != 0) {
-            neighbors.add(PointUtils.packWorldPoint(x + 1, y, z));
-        }
-        if ((flags & Flags.WEST) != 0) {
-            neighbors.add(PointUtils.packWorldPoint(x - 1, y, z));
-        }
-        if ((flags & Flags.NORTHEAST) != 0) {
-            neighbors.add(PointUtils.packWorldPoint(x + 1, y + 1, z));
-        }
-        if ((flags & Flags.NORTHWEST) != 0) {
-            neighbors.add(PointUtils.packWorldPoint(x - 1, y + 1, z));
-        }
-        if ((flags & Flags.SOUTHEAST) != 0) {
-            neighbors.add(PointUtils.packWorldPoint(x + 1, y - 1, z));
-        }
-        if ((flags & Flags.SOUTHWEST) != 0) {
-            neighbors.add(PointUtils.packWorldPoint(x - 1, y - 1, z));
-        }
-    }
-
-    private void addTransportationNeighbors(List<Integer> neighbors, int packedPoint) {
-        // Specific shortcuts
-        shortcutMap.getOrDefault(packedPoint, Collections.emptyList()).stream()
-                .filter(Transportation::isAvailable)
-                .map(t -> PointUtils.packWorldPoint(t.getDestinationX(), t.getDestinationY(), t.getDestinationZ()))
-                .filter(dest -> dest != packedPoint)
-                .forEach(neighbors::add);
-
-        // Global shortcuts if at start
-        if (packedPoint == startPackedPoint) {
-            shortcutMap.getOrDefault(PiggyWalkerPlugin.GLOBAL_KEY, Collections.emptyList()).stream()
-                    .filter(Transportation::isAvailable)
-                    .map(t -> PointUtils.packWorldPoint(t.getDestinationX(), t.getDestinationY(), t.getDestinationZ()))
-                    .filter(dest -> dest != startPackedPoint)
-                    .forEach(neighbors::add);
-        }
-    }
-
+    /**
+     * Internal class representing a node in the search.
+     */
     private static class Node implements Comparable<Node> {
         int packedPoint;
         Node cameFrom;
@@ -433,4 +460,3 @@ public class Pathfinder {
         }
     }
 }
-
